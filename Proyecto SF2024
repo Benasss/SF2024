@@ -1,0 +1,1050 @@
+"""
+PROYECTO FINAL SEMINARIO DE FINANZAS
+Benavides Esquivel Luis Ángel
+Pérez Galindo Antonio Aldair
+"""
+
+import streamlit as st
+import yfinance as yf
+import pandas as pd
+import plotly.graph_objects as go
+import plotly.express as px
+import numpy as np
+from datetime import datetime, timedelta
+from scipy.optimize import minimize
+
+# Funciones auxiliares
+def obtener_datos_acciones(simbolos, start_date, end_date):
+    data = yf.download(simbolos, start=start_date, end=end_date)['Close']
+    return data.ffill().dropna()
+
+def calcular_metricas(df):
+    returns = df.pct_change().dropna()
+    cumulative_returns = (1 + returns).cumprod() - 1
+    normalized_prices = df / df.iloc[0] * 100
+    return returns, cumulative_returns, normalized_prices
+
+def calcular_rendimientos_portafolio(returns, weights):
+    return (returns * weights).sum(axis=1)
+
+def calcular_rendimiento_ventana(returns, window):
+    if len(returns) < window:
+        return np.nan
+    return (1 + returns.iloc[-window:]).prod() - 1
+
+def calcular_beta(asset_returns, market_returns):
+    covariance = np.cov(asset_returns, market_returns)[0, 1]
+    market_variance = np.var(market_returns)
+    return covariance / market_variance if market_variance != 0 else np.nan
+
+def calcular_sharpe_ratio(returns, risk_free_rate=0.02):
+    excess_returns = returns - risk_free_rate / 252
+    return np.sqrt(252) * excess_returns.mean() / excess_returns.std()
+
+def calcular_sortino_ratio(returns, risk_free_rate=0.02, target_return=0):
+    excess_returns = returns - risk_free_rate / 252
+    downside_returns = excess_returns[excess_returns < target_return]
+    downside_deviation = np.sqrt(np.mean(downside_returns**2))
+    return np.sqrt(252) * excess_returns.mean() / downside_deviation if downside_deviation != 0 else np.nan
+
+# Nuevas funciones para VaR y CVaR
+def calcular_var_cvar(returns, confidence=0.95):
+    VaR = returns.quantile(1 - confidence)
+    CVaR = returns[returns <= VaR].mean()
+    return VaR, CVaR
+
+def calcular_var_cvar_ventana(returns, window):
+    if len(returns) < window:
+        return np.nan, np.nan
+    window_returns = returns.iloc[-window:]
+    return calcular_var_cvar(window_returns)
+
+def crear_histograma_distribucion(returns, var_95, cvar_95, title):
+    # Crear el histograma base
+    fig = go.Figure()
+    
+    # Calcular los bins para el histograma
+    counts, bins = np.histogram(returns, bins=50)
+    
+    # Separar los bins en dos grupos: antes y después del VaR
+    mask_before_var = bins[:-1] <= var_95
+    
+    # Añadir histograma para valores antes del VaR (rojo)
+    fig.add_trace(go.Bar(
+        x=bins[:-1][mask_before_var],
+        y=counts[mask_before_var],
+        width=np.diff(bins)[mask_before_var],
+        name='Retornos < VaR',
+        marker_color='rgba(255, 65, 54, 0.6)'
+    ))
+    
+    # Añadir histograma para valores después del VaR (azul)
+    fig.add_trace(go.Bar(
+        x=bins[:-1][~mask_before_var],
+        y=counts[~mask_before_var],
+        width=np.diff(bins)[~mask_before_var],
+        name='Retornos > VaR',
+        marker_color='rgba(31, 119, 180, 0.6)'
+    ))
+    
+    # Añadir líneas verticales para VaR y CVaR
+    fig.add_trace(go.Scatter(
+        x=[var_95, var_95],
+        y=[0, max(counts)],
+        mode='lines',
+        name='VaR 95%',
+        line=dict(color='green', width=2, dash='dash')
+    ))
+    
+    fig.add_trace(go.Scatter(
+        x=[cvar_95, cvar_95],
+        y=[0, max(counts)],
+        mode='lines',
+        name='CVaR 95%',
+        line=dict(color='purple', width=2, dash='dot')
+    ))
+    
+    # Actualizar el diseño
+    fig.update_layout(
+        title=title,
+        xaxis_title='Retornos',
+        yaxis_title='Frecuencia',
+        showlegend=True,
+        barmode='overlay',
+        bargap=0
+    )
+    
+    return fig
+
+##Todo esto que viene para los portafolios
+def Rendimiento_Diario(etf,fecha_inicio,fecha_fin):
+    accion=yf.Ticker(etf) #obtenemos la infromación del etf a consultar
+    datos=accion.history(start=fecha_inicio,end=fecha_fin)
+    precios_close=datos['Close'] # elegimos su precios de cierre
+    Rendimientos_d = datos['Close'].pct_change() #calculamos lo rendimiento diarios
+    return Rendimientos_d 
+def Rendimiento_Anual(etf, fecha_inicio,fecha_fin):
+    # Obtenemos la información del ETF
+    accion = yf.Ticker(etf)
+    datos = accion.history(start=fecha_inicio,end=fecha_fin)
+    # Extraemos solo los precios de cierre
+    precios_close = datos['Close']
+    # Lista para almacenar los rendimientos anuales
+    rendimientos_anuales = []
+    # Ciclo para analizar los datos por bloques anuales y calcular el rendimiento anual
+    for i in range(2010, 2020):  # Iteramos desde 2010 hasta 2020
+        # Filtramos los datos por año
+        datos_anuales = precios_close[f"{i}-01-01":f"{i}-12-31"]
+        
+        # Validamos que haya datos en ese año
+        if len(datos_anuales) > 1:
+            precio_inicial = datos_anuales.iloc[0]  # Primer precio del año
+            precio_final = datos_anuales.iloc[-1]  # Último precio del año
+            
+            # Calculamos el rendimiento anual
+            r_a = (precio_final / precio_inicial) - 1
+            rendimientos_anuales.append(r_a)
+
+    # Devolvemos la lista de rendimientos anuales
+    return rendimientos_anuales
+
+ETFS = ['AGG', 'EMB', 'VOO', 'VWO', 'DBC']
+fecha_inicio='2010-01-01' #Fijamos la fecha de incio de obtención de datos, hata fecha actual
+fecha_fin = '2023-12-31'
+#construimos el data frame empleando nuestras funciones previamente contruidas
+datos_rendimientos=pd.DataFrame({
+    ETFS[0]:Rendimiento_Diario(ETFS[0],fecha_inicio,fecha_fin),
+    ETFS[1]:Rendimiento_Diario(ETFS[1],fecha_inicio,fecha_fin),
+    ETFS[2]:Rendimiento_Diario(ETFS[2],fecha_inicio,fecha_fin),
+    ETFS[3]:Rendimiento_Diario(ETFS[3],fecha_inicio,fecha_fin),
+    ETFS[4]:Rendimiento_Diario(ETFS[4],fecha_inicio,fecha_fin)
+})
+
+def calcular_rendimientos_portafolio(datos_rendimiento, weights):
+        return (datos_rendimiento * weights).sum(axis=1)
+#Calculo de medidas con ayuda de la paqueteria numpy y pandas
+# Mediana
+mediana = datos_rendimientos.median()
+
+
+# Varianza
+varianza = datos_rendimientos.var()
+
+
+# Desviación estándar
+desviacion_estandar = datos_rendimientos.std()
+
+
+# Matriz de covarianza
+covarianza = datos_rendimientos.cov()
+
+# Matriz de correlaciones
+correlacion = datos_rendimientos.corr()
+
+# Sesgo (Skewness)
+sesgo = datos_rendimientos.skew()
+
+# Exceso de curtosis
+curtosis = datos_rendimientos.kurt()
+
+rendimientos_esperado=datos_rendimientos.median() # Rendimientos esperados
+M_covarianza = datos_rendimientos.cov() # Matriz de covarianzas
+
+# Calcular A, B, y C
+ones = np.ones(len(rendimientos_esperado))
+inv_cov_matrix = np.linalg.inv(M_covarianza)
+
+A = ones.T @ inv_cov_matrix @ ones
+B = rendimientos_esperado.T @ inv_cov_matrix @ ones
+C = rendimientos_esperado.T @ inv_cov_matrix @ rendimientos_esperado
+m = 0.13  # Rendimiento objetivo
+
+# Pesos del portafolio
+g = (A * m - B) / (A * C - B**2)
+h = (C - B * m) / (A * C - B**2)
+weights_target = g * inv_cov_matrix @ rendimientos_esperado + h * inv_cov_matrix @ ones
+
+# Mostrar resultados
+
+# Configuración de la página
+    # Configuración de la página
+st.set_page_config(page_title="Analizador de Portafolio", layout="wide")
+st.markdown(
+    """
+    <style>
+        /* Fondo de la página */
+        body {
+            background-color: #000000;
+            color: #ffffff;
+        }
+
+        /* Título principal del proyecto */
+        .css-145kmo2 {
+            color: #ff0000;
+        }
+
+        /* Texto general */
+        h1, h2, h3, h4, h5, h6, p, li {
+            color: #ff0000;
+        }
+
+        /* Encabezados y elementos importantes */
+        .stHeader, .stTitle, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3, .stMarkdown h4, .stMarkdown h5, .stMarkdown h6 {
+            color: #ff0000;
+        }
+
+        /* Barra lateral */
+        .stSidebar {
+            background-color: #1a1a1a;
+            color: #ffffff;
+        }
+
+        /* Botones */
+        .stButton>button {
+            background-color: #ff0000;
+            color: #ffffff;
+            border: 1px solid #000000;
+        }
+        .stButton>button:hover {
+            background-color: #cc0000;
+            border-color: #cc0000;
+        }
+
+        /* Pestañas */
+        .stTabs [role="tablist"] {
+            background: #000000;
+        }
+        .stTabs [role="tab"] {
+            color: #ffffff;
+            background-color: #1a1a1a;
+        }
+        .stTabs [role="tab"]:hover {
+            background-color: #660000;
+        }
+        .stTabs [role="tab"][aria-selected="true"] {
+            background-color: #990000;
+            color: #ffffff;
+        }
+
+        /* Inputs */
+        input {
+            background-color: #1a1a1a;
+            color: #ffffff;
+            border: 1px solid #ff0000;
+        }
+
+        /* Gráficos y mapas */
+        .plotly-dark-mode {
+            background-color: #000000;
+            color: #ffffff;
+        }
+
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+st.sidebar.title("Analizador de Portafolio de Inversión")
+
+# Entrada de símbolos desde la barra lateral
+simbolos_input = st.sidebar.text_input("Aquí están los ETF´s elegidos que son:", value="AGG, EMB, VOO, VWO, DBC")
+simbolos = [s.strip() for s in simbolos_input.split(',')]
+
+# Crear pestañas
+tab1, tab2, tab3, tab4,tab5 = st.tabs(["Seleccion de Activos", "Estadísticas de los activos", "Portafolios óptimos","Backtesting","Black Litterman"])
+
+with tab1:
+    st.header("Análisis de los ETF´s")
+    selected_asset = st.selectbox("Seleccione un activo para analizar:", simbolos)
+
+    # Descripciones de los ETFs
+    etf_descriptions = {
+        'AGG': """
+            ### Información sobre AGG:
+            - *Símbolo*: AGG
+            - *Emisor*: iShares (parte de BlackRock)
+            - *Inversión mínima*: El precio de una sola acción de AGG, que suele estar alrededor de $100 a $120 USD por acción.
+            - *Tipo*: Renta Fija Desarrollada
+            - *Índice que sigue*: Bloomberg U.S. Aggregate Bond Index
+            - *Moneda de denominación*: USD
+            - *Principales contribuidores*: Agencias gubernamentales de EE.UU., bonos corporativos de alto crédito
+            - *Países de inversión*: Estados Unidos
+            - *Estilo*: Renta fija conservadora
+        """,
+        'EMB': """
+            ### Información sobre EMB:
+            - *Símbolo*: EMB
+            - *Emisor*: iShares (parte de BlackRock)
+            - *Inversión mínima*: El precio de una sola acción de EMB, que suele estar alrededor de $100 a $120 USD por acción.
+            - *Tipo*: Renta Fija Emergente
+            - *Índice que sigue*: J.P. Morgan EMBI Global Core Index
+            - *Moneda de denominación*: USD
+            - *Principales contribuidores*: Bonos soberanos y corporativos de mercados emergentes
+            - *Países de inversión*: América Latina, Asia, Europa del Este, África
+            - *Estilo*: Diversificado en renta fija emergente
+        """,
+        'VOO': """
+            ### Información sobre VOO:
+            - *Símbolo*: VOO
+            - *Emisor*: Vanguard
+            - *Inversión mínima*: El precio de una sola acción de VOO, que suele estar alrededor de $200 a $300 USD por acción.
+            - *Tipo*: Renta Variable Desarrollada
+            - *Índice que sigue*: S&P 500 Index
+            - *Moneda de denominación*: USD
+            - *Principales contribuidores*: Grandes empresas estadounidenses como Apple, Microsoft, Amazon
+            - *Países de inversión*: Estados Unidos
+            - *Estilo*: Crecimiento y valor, representativo del mercado estadounidense
+        """,
+        'VWO': """
+            ### Información sobre VWO:
+            - *Símbolo*: VWO
+            - *Emisor*: Vanguard
+            - *Inversión mínima*: El precio de una sola acción de VWO, que suele estar alrededor de $50 a $60 USD por acción.
+            - *Tipo*: Renta Variable Emergente
+            - *Índice que sigue*: FTSE Emerging Markets All Cap China A Inclusion Index
+            - *Moneda de denominación*: USD
+            - *Principales contribuidores*: Empresas de mercados emergentes como Alibaba, Tencent
+            - *Países de inversión*: China, Taiwán, India, Brasil, Sudáfrica
+            - *Estilo*: Crecimiento y valor en mercados emergentes
+        """,
+        'DBC': """
+            ### Información sobre DBC:
+            - *Símbolo*: DBC
+            - *Emisor*: Invesco
+            - *Inversión mínima*: El precio de una sola acción de DBC, que suele estar alrededor de $20 a $25 USD por acción.
+            - *Tipo*: Materias Primas
+            - *Índice que sigue*: DB Commodity Index
+            - *Moneda de denominación*: USD
+            - *Principales contribuidores*: Commodities como petróleo, oro, gas natural, maíz
+            - *Países de inversión*: Global
+            - *Estilo*: Inversión directa en commodities
+        """,
+    }
+
+    # Mostrar la descripción del ETF seleccionado
+    st.markdown(etf_descriptions[selected_asset])
+
+    # Datos de países de inversión
+    etf_country_data = {
+        'AGG': ['United States'],
+        'EMB': ['Latin America', 'Asia', 'Eastern Europe', 'Africa'],
+        'VOO': ['United States'],
+        'VWO': ['China', 'Taiwan', 'India', 'Brazil', 'South Africa'],
+        'DBC': ['Global']
+    }
+
+    # Crear gráfico de mapa global
+    df_countries = pd.DataFrame(etf_country_data[selected_asset], columns=['Country'])
+    fig = px.scatter_geo(
+        df_countries,
+        locations='Country',
+        locationmode='country names',
+        hover_name='Country',
+        title=f'Países de Inversión del ETF: {selected_asset}',
+        projection='natural earth',
+        template='plotly_dark',
+    )
+    fig.update_traces(marker=dict(size=10, color='#00ff00', line=dict(width=2, color='DarkSlateGrey')))
+    fig.update_geos(
+        showland=True, landcolor="#e6e6e6",
+        showocean=True, oceancolor="#333333",
+        showcountries=True, countrycolor="#ffffff"
+    )
+    st.plotly_chart(fig)
+
+with tab2:
+    st.header("Un poco de estadística, datos desde 2010 a 2023")
+    
+    # Definición de las fechas fijas
+    start_date = datetime(2010, 1, 1)  # Fecha de inicio: 1 de enero de 2010
+    end_date = datetime(2023, 12, 31)  # Fecha de fin: 31 de diciembre de 2023
+
+    # Mostrar información de las fechas en la interfaz
+    st.write(f"Datos analizados desde: {start_date.strftime('%d/%m/%Y')} hasta: {end_date.strftime('%d/%m/%Y')}")
+ 
+    # Entrada para símbolos de acciones
+    all_symbols = st.text_input(
+        "Ingresa los símbolos de las acciones separados por comas (ej. AAPL, MSFT, GOOGL):", 
+        "AGG, EMB, VOO, VWO, DBC"
+    )
+    
+    # Procesar los símbolos
+    simbolos = [symbol.strip() for symbol in all_symbols.split(",")]
+    
+    # Descargar los datos
+    with st.spinner("Cargando datos históricos de acciones..."):
+        df_stocks = obtener_datos_acciones(simbolos, start_date, end_date)
+
+    # Calcular métricas
+    returns, cumulative_returns, normalized_prices = calcular_metricas(df_stocks)
+
+    # Mostrar información básica
+    st.subheader("Últimos datos descargados")
+    st.write(df_stocks.tail())
+    
+    # Visualización de los rendimientos acumulados
+    st.subheader("Rendimientos acumulados")
+    fig_cumulative = px.line(cumulative_returns, title="Rendimientos acumulados desde 2010")
+    st.plotly_chart(fig_cumulative)
+
+    # Visualización de los precios normalizados
+    st.subheader("Precios normalizados")
+    fig_normalized = px.line(normalized_prices, title="Precios normalizados")
+    st.plotly_chart(fig_normalized)
+    
+    # Análisis estadístico básico
+    st.subheader("Estadísticas básicas")
+    st.write("Resumen estadístico de los rendimientos:")
+    st.dataframe(returns.describe())
+    
+    # Cálculos financieros avanzados
+    st.subheader("Cálculos avanzados: Beta, Sharpe, Sortino, VaR y CVaR")
+    
+    # Selección de símbolo para análisis adicional
+    selected_symbol = st.selectbox("Selecciona un símbolo para realizar análisis avanzado", simbolos)
+    
+    if selected_symbol in returns.columns:
+        st.write(f"Análisis para el símbolo: {selected_symbol}")
+
+        #parte de los rendimientos
+        st.write("Rendimientos diarios del activo seleccionado:")
+        st.dataframe(returns[selected_symbol].tail(30))  # Muestra los últimos 30 días de rendimientos diarios
+        
+        # Cálculo de Beta
+        market_returns = returns.mean(axis=1)  # Aproximación para el análisis del mercado general
+        beta = calcular_beta(returns[selected_symbol], market_returns)
+        st.write(f"Beta: {beta:.4f}")
+        
+        # Cálculo del Ratio de Sharpe
+        sharpe_ratio = calcular_sharpe_ratio(returns[selected_symbol])
+        st.write(f"Ratio de Sharpe: {sharpe_ratio:.4f}")
+        
+        # Cálculo del Ratio de Sortino
+        sortino_ratio = calcular_sortino_ratio(returns[selected_symbol])
+        st.write(f"Ratio de Sortino: {sortino_ratio:.4f}")
+        
+        # Cálculo de VaR y CVaR
+        VaR, CVaR = calcular_var_cvar(returns[selected_symbol])
+        st.write(f"VaR al 95%: {VaR:.2%}")
+        st.write(f"CVaR al 95%: {CVaR:.2%}")
+        
+    else:
+        st.warning("Selecciona un símbolo válido para realizar los cálculos.")
+    
+with tab3:
+        st.header("Calculando el portafolio óptimo")
+        st.subheader("Portafolio de mínima volatilidad")
+
+        # Mostrar la ecuación con st.latex()
+        st.latex(r"""
+        \text{min}_w \frac{1}{2} w^T \Sigma w
+        """)
+
+        st.latex(r"""
+        w^T \mu = m
+        """)
+        
+        st.latex(r"""
+        w^T \mathbf{1} = 1
+        """)
+
+        # Calculamos la matriz de covarianza
+        M_covarianza = datos_rendimientos.cov()
+        rendimientos_esperados = datos_rendimientos.mean()  # Rendimientos esperados de cada ETF
+        ETFS = ['AGG', 'EMB', 'VOO', 'VWO', 'DBC']
+
+        # Función para calcular la varianza de un portafolio dado un vector de pesos
+        def calcular_varianza(weights, cov_matrix):
+            return weights.T @ cov_matrix @ weights
+
+        # Función para definir la restricción de suma de pesos = 1
+        def restricciones(weights):
+            return np.sum(weights) - 1
+
+        # Optimización para encontrar los pesos con mínima volatilidad
+        def optimizar_portafolio(cov_matrix, rendimientos_esperados):
+            num_activos = len(rendimientos_esperados)
+
+        #    Definir restricciones
+            restricciones_totales = [{'type': 'eq', 'fun': restricciones}]
+
+            # Definir límites para los pesos entre 0 y 1
+            limites = [(0, 1) for _ in range(num_activos)]
+
+            # Resolver la optimización
+            resultado = minimize(
+                fun=calcular_varianza, 
+                x0=np.ones(num_activos) / num_activos,  # Inicializamos con pesos iguales
+                args=(cov_matrix,),
+                constraints=restricciones_totales,
+                bounds=limites
+            )
+
+    # Devolver los pesos óptimos
+            if resultado.success:
+                return resultado.x
+            else:
+                raise Exception("La optimización no fue exitosa")
+
+# Calcular los pesos óptimos
+        pesos_optimos = optimizar_portafolio(M_covarianza, rendimientos_esperados)
+        weights = pesos_optimos
+        st.write("### Pesos bajo Mínima Volatilidad:")
+        st.write(pd.Series(pesos_optimos, index=ETFS))
+        ##sharpe ratio  
+
+        st.subheader("Portafolio de máximo sharpe ratio")
+        st.latex(r"""
+        \max_w V(w) = \left(r + w^T (\mu - r \mathbf{1})\right) - \frac{\lambda}{2} w^T \Sigma w
+        """)
+        # Calculamos la matriz de covarianza
+        M_covarianza = datos_rendimientos.cov()
+        rendimientos_esperados = datos_rendimientos.mean()  # Rendimientos esperados de cada ETF
+        ETFS = ['AGG', 'EMB', 'VOO', 'VWO', 'DBC']
+        tasa_libre_riesgo_anual = 0.1025
+        tasa_libre_riesgo_diaria = tasa_libre_riesgo_anual / 252
+
+        # Función para calcular el ratio de Sharpe de un portafolio dado un vector de pesos
+        def calcular_sharpe_ratio(weights, rendimientos_esperados, cov_matrix, tasa_libre_riesgo):
+            rendimiento_portafolio = np.sum(weights * rendimientos_esperados)
+            volatilidad_portafolio = np.sqrt(weights.T @ cov_matrix @ weights)
+            sharpe_ratio = (rendimiento_portafolio - tasa_libre_riesgo) / volatilidad_portafolio
+            return -sharpe_ratio  # Negativo porque minimizaremos
+
+        # Función para definir la restricción de suma de pesos = 1
+        def restricciones(weights):
+            return np.sum(weights) - 1
+
+        # Optimización para encontrar los pesos con máximo Sharpe ratio
+        def optimizar_portafolio_sharpe(cov_matrix, rendimientos_esperados, tasa_libre_riesgo):
+            num_activos = len(rendimientos_esperados)
+
+            # Definir restricciones
+            restricciones_totales = [{'type': 'eq', 'fun': restricciones}]
+
+            # Definir límites para los pesos entre 0 y 1
+            limites = [(0, 1) for _ in range(num_activos)]
+
+            # Resolver la optimización
+            resultado = minimize(
+                fun=calcular_sharpe_ratio, 
+                x0=np.ones(num_activos) / num_activos,  # Inicializamos con pesos iguales
+                args=(rendimientos_esperados, cov_matrix, tasa_libre_riesgo),
+                constraints=restricciones_totales,
+                bounds=limites
+            )
+
+            # Devolver los pesos óptimos
+            if resultado.success:
+                return resultado.x
+            else:
+                st.error("La optimización no fue exitosa")
+                return None
+
+        # Calcular los pesos óptimos para el máximo Sharpe ratio
+        pesos_optimos_sharpe = optimizar_portafolio_sharpe(M_covarianza, rendimientos_esperados, tasa_libre_riesgo_diaria)
+
+        if pesos_optimos_sharpe is not None:
+            st.write("### Pesos bajo Máximo Sharpe Ratio:")
+            st.write(pd.Series(pesos_optimos_sharpe, index=ETFS))
+
+
+
+        ##objetivo del 10%
+        st.subheader("Portafolio de mínima volatilidad con objetivo del 10%")
+                # Mostrar la ecuación con st.latex()
+        st.latex(r"""
+        \text{min}_w \frac{1}{2} w^T \Sigma w
+        """)
+
+        st.latex(r"""
+        w^T \mu = .10%
+        """)
+#aqui calculamos el portafolio
+        ETFS = ['AGG', 'EMB', 'VOO', 'VWO', 'DBC']
+        fecha_inicio='2010-01-01' #Fijamos la fecha de incio de obtención de datos, hata fecha actual
+        fecha_fin = '2023-12-31'
+        #construimos el data frame empleando nuestras funciones previamente contruidas
+        datos_rendimientos=pd.DataFrame({
+            ETFS[0]:Rendimiento_Diario(ETFS[0],fecha_inicio,fecha_fin),
+            ETFS[1]:Rendimiento_Diario(ETFS[1],fecha_inicio,fecha_fin),
+            ETFS[2]:Rendimiento_Diario(ETFS[2],fecha_inicio,fecha_fin),
+            ETFS[3]:Rendimiento_Diario(ETFS[3],fecha_inicio,fecha_fin),
+            ETFS[4]:Rendimiento_Diario(ETFS[4],fecha_inicio,fecha_fin)
+        })
+        #Calculo de medidas con ayuda de la paqueteria numpy y pandas
+        # Mediana
+        mediana = datos_rendimientos.median()
+
+
+        # Varianza
+        varianza = datos_rendimientos.var()
+
+
+        # Desviación estándar
+        desviacion_estandar = datos_rendimientos.std()
+
+
+        # Matriz de covarianza
+        covarianza = datos_rendimientos.cov()
+
+        # Matriz de correlaciones
+        correlacion = datos_rendimientos.corr()
+
+        # Sesgo (Skewness)
+        sesgo = datos_rendimientos.skew()
+
+        # Exceso de curtosis
+        curtosis = datos_rendimientos.kurt()
+
+        rendimientos_esperado=datos_rendimientos.median() # Rendimientos esperados
+        M_covarianza = datos_rendimientos.cov() # Matriz de covarianzas
+
+        # Calcular A, B, y C
+        ones = np.ones(len(rendimientos_esperado))
+        inv_cov_matrix = np.linalg.inv(M_covarianza)
+
+        A = ones.T @ inv_cov_matrix @ ones
+        B = rendimientos_esperado.T @ inv_cov_matrix @ ones
+        C = rendimientos_esperado.T @ inv_cov_matrix @ rendimientos_esperado
+        m = 0.10  # Rendimiento objetivo
+
+        # Pesos del portafolio
+        g = (A * m - B) / (A * C - B**2)
+        h = (C - B * m) / (A * C - B**2)
+        weights_target = g * inv_cov_matrix @ rendimientos_esperado + h * inv_cov_matrix @ ones
+        st.write("Pesos del portafolio con rendimiento objetivo del 10%:")
+        st.write(pd.Series(weights_target, index=ETFS))
+
+with tab4:
+    
+    st.header("Backtesting")
+    st.subheader("Evaluemos estos portafolios con datos de 2021 a 2023")
+    
+    opcion = st.selectbox(
+        "Selecciona el tipo de portafolio a comparar:",
+        ["Mínima varianza", "Máximo Sharpe ratio", "Rendimiento objetivo del 10%"]
+    )
+    
+    def Rendimiento_Anual(etf, fecha_inicio, fecha_fin):
+        # Obtenemos la información del ETF
+        accion = yf.Ticker(etf)
+        datos = accion.history(start=fecha_inicio, end=fecha_fin)
+        
+        # Extraemos solo los precios de cierre
+        precios_close = datos['Close']
+        
+        # Lista para almacenar los rendimientos anuales
+        rendimientos_anuales = []
+        
+        # Ciclo para analizar los datos por bloques anuales y calcular el rendimiento anual
+        for i in range(2021, 2024):  # Iteramos desde 2021 hasta 2023
+            # Filtramos los datos por año
+            datos_anuales = precios_close[f"{i}-01-01":f"{i}-12-31"]
+            
+            # Validamos que haya datos en ese año
+            if len(datos_anuales) > 1:
+                precio_inicial = datos_anuales.iloc[0]  # Primer precio del año
+                precio_final = datos_anuales.iloc[-1]  # Último precio del año
+                
+                # Calculamos el rendimiento anual
+                r_a = (precio_final / precio_inicial) - 1
+                rendimientos_anuales.append(r_a)
+
+        # Devolvemos la lista de rendimientos anuales
+        return rendimientos_anuales
+    
+    if opcion == "Mínima varianza":
+        # Definición de los ETFs y fechas de análisis
+        ETFS = ['AGG', 'EMB', 'VOO', 'VWO', 'DBC']
+        fecha_inicio = '2021-01-01'
+        fecha_fin = '2023-12-31'
+        
+        # Construcción del DataFrame con rendimientos de cada ETF
+        datos_rendimientos = pd.DataFrame({
+            ETF: Rendimiento_Anual(ETF, fecha_inicio, fecha_fin) for ETF in ETFS
+        })
+
+        # Cálculo del rendimiento acumulado por ETF
+        rendimientos_acumulados = (1 + datos_rendimientos).cumprod() - 1
+
+        # Pesos para cada ETF
+        weights = [0.2, 0.2, 0.2, 0.2, 0.2]
+        pesos = np.array(weights)
+        
+        # Cálculo del rendimiento del portafolio
+        comportamiento_1 = calcular_rendimientos_portafolio(datos_rendimientos, pesos)
+        
+        # Mostrar resultados
+        st.write("Rendimientos del portafolio calculados:")
+        st.write("La columna 1 son 2021, 2022 y 2023 correspondientes")
+        st.write("La columna 2 es el portafolio")
+        st.write(comportamiento_1)
+        st.line_chart(comportamiento_1)  # Graficar rendimientos del portafolio
+        
+        st.write("Rendimientos acumulados por ETF:")
+        st.write(rendimientos_acumulados)
+        st.line_chart(rendimientos_acumulados)  # Graficar rendimientos acumulados de cada ETF
+                # Varianza
+        varianza = datos_rendimientos.var()
+        st.write(varianza)
+
+        # Desviación estándar
+        desviacion_estandar = datos_rendimientos.std()
+        st.write("Desviación estandar del portafolio")
+        st.write(desviacion_estandar)
+
+        # Matriz de covarianza
+        covarianza = datos_rendimientos.cov()
+        st.write("Covarianza del portafolio")
+        st.write(covarianza)
+        # Matriz de correlaciones
+        correlacion = datos_rendimientos.corr()
+        st.write("Correlación del portafolio")
+        st.write(correlacion)
+        # Sesgo (Skewness)
+        sesgo = datos_rendimientos.skew()
+        st.write("Sesgo del portafolio")
+        st.write(sesgo)
+        # Exceso de curtosis
+        curtosis = datos_rendimientos.kurt()
+        st.write("Curtosis")
+        st.write(curtosis)
+
+        CVaR_Var= calcular_var_cvar(datos_rendimientos,confidence=0.95)
+        st.write("Var y cVar")
+        st.write(CVaR_Var)
+        
+        #sharpe_ratio = calcular_sharpe_ratio(datos_rendimientos, .0432)
+        #st.write("Sharpe ratio")
+        #st.write(sharpe_ratio)
+        #sortino_ratio = calcular_sortino_ratio(datos_rendimientos,.0432,0)
+        #st.write("Sortino ratio")
+        #st.write(sortino_ratio)
+    
+    if opcion == "Máximo Sharpe ratio":
+        # Definición de los ETFs y fechas de análisis
+        ETFS = ['AGG', 'EMB', 'VOO', 'VWO', 'DBC']
+        fecha_inicio = '2021-01-01'
+        fecha_fin = '2023-12-31'
+        
+        # Construcción del DataFrame con rendimientos de cada ETF
+        datos_rendimientos = pd.DataFrame({
+            ETF: Rendimiento_Anual(ETF, fecha_inicio, fecha_fin) for ETF in ETFS
+        })
+
+        # Cálculo del rendimiento acumulado por ETF
+        rendimientos_acumulados = (1 + datos_rendimientos).cumprod() - 1
+
+        # Pesos para cada ETF
+        weights = [0, 0, 1, 0, 0]
+        pesos = np.array(weights)
+        
+        # Cálculo del rendimiento del portafolio
+        comportamiento_2 = calcular_rendimientos_portafolio(datos_rendimientos, pesos)
+        
+        # Mostrar resultados
+        st.write("Rendimientos del portafolio calculados:")
+        st.write("La columna 1 son 2021, 2022 y 2023 correspondientes")
+        st.write("La columna 2 es el portafolio")
+        st.write(comportamiento_2)
+        st.line_chart(comportamiento_2)  # Graficar rendimientos del portafolio
+        
+        st.write("Rendimientos acumulados por ETF:")
+        st.write(rendimientos_acumulados)
+        st.line_chart(rendimientos_acumulados)  # Graficar rendimientos acumulados de cada ETF
+                # Varianza
+        varianza = datos_rendimientos.var()
+        st.write(varianza)
+
+        # Desviación estándar
+        desviacion_estandar = datos_rendimientos.std()
+        st.write("Desviación estandar del portafolio")
+        st.write(desviacion_estandar)
+
+        # Matriz de covarianza
+        covarianza = datos_rendimientos.cov()
+        st.write("Covarianza del portafolio")
+        st.write(covarianza)
+        # Matriz de correlaciones
+        correlacion = datos_rendimientos.corr()
+        st.write("Correlación del portafolio")
+        st.write(correlacion)
+        # Sesgo (Skewness)
+        sesgo = datos_rendimientos.skew()
+        st.write("Sesgo del portafolio")
+        st.write(sesgo)
+        # Exceso de curtosis
+        curtosis = datos_rendimientos.kurt()
+        st.write("Curtosis")
+        st.write(curtosis)
+
+        CVaR_Var= calcular_var_cvar(datos_rendimientos,confidence=0.95)
+        st.write("Var y cVar")
+        st.write(CVaR_Var)
+        
+        #sharpe_ratio = calcular_sharpe_ratio(datos_rendimientos, .0432)
+        #st.write("Sharpe ratio")
+        #st.write(sharpe_ratio)
+        #sortino_ratio = calcular_sortino_ratio(datos_rendimientos,.0432,0)
+        #st.write("Sortino ratio")
+        #st.write(sortino_ratio)
+
+    if opcion == "Rendimiento objetivo del 10%":
+        # Definición de los ETFs y fechas de análisis
+        ETFS = ['AGG', 'EMB', 'VOO', 'VWO', 'DBC']
+        fecha_inicio = '2021-01-01'
+        fecha_fin = '2023-12-31'
+        
+        # Construcción del DataFrame con rendimientos de cada ETF
+        datos_rendimientos = pd.DataFrame({
+            ETF: Rendimiento_Anual(ETF, fecha_inicio, fecha_fin) for ETF in ETFS
+        })
+
+        # Cálculo del rendimiento acumulado por ETF
+        rendimientos_acumulados = (1 + datos_rendimientos).cumprod() - 1
+
+        # Pesos para cada ETF
+        w = [-241.16666812076141, 101.65210869866094, 150.96682288775153, -87.39099746971151, 76.93873400406069]
+        pesos = np.array(w)
+        
+        # Cálculo del rendimiento del portafolio
+        comportamiento_3 = calcular_rendimientos_portafolio(datos_rendimientos, pesos)
+        
+        # Mostrar resultados
+        st.write("Rendimientos del portafolio calculados:")
+        st.write("La columna 1 son 2021, 2022 y 2023 correspondientes")
+        st.write("La columna 2 es el portafolio")
+        st.write(comportamiento_3)
+        st.line_chart(comportamiento_3)  # Graficar rendimientos del portafolio
+        
+        st.write("Rendimientos acumulados por ETF:")
+        st.write(rendimientos_acumulados)
+        st.line_chart(rendimientos_acumulados)  # Graficar rendimientos acumulados de cada ETF
+        mediana = datos_rendimientos.median()
+        # Varianza
+        varianza = datos_rendimientos.var()
+        st.write(varianza)
+
+        # Desviación estándar
+        desviacion_estandar = datos_rendimientos.std()
+        st.write("Desviación estandar del portafolio")
+        st.write(desviacion_estandar)
+
+        # Matriz de covarianza
+        covarianza = datos_rendimientos.cov()
+        st.write("Covarianza del portafolio")
+        st.write(covarianza)
+        # Matriz de correlaciones
+        correlacion = datos_rendimientos.corr()
+        st.write("Correlación del portafolio")
+        st.write(correlacion)
+        # Sesgo (Skewness)
+        sesgo = datos_rendimientos.skew()
+        st.write("Sesgo del portafolio")
+        st.write(sesgo)
+        # Exceso de curtosis
+        curtosis = datos_rendimientos.kurt()
+        st.write("Curtosis")
+        st.write(curtosis)
+
+        CVaR_Var= calcular_var_cvar(datos_rendimientos,confidence=0.95)
+        st.write("Var y cVar")
+        st.write(CVaR_Var)
+        #sharpe_ratio = calcular_sharpe_ratio(datos_rendimientos, .0432)
+        #st.write("Sharpe ratio")
+        #st.write(sharpe_ratio)
+        #sortino_ratio = calcular_sortino_ratio(datos_rendimientos,.0432,0)
+        #st.write("Sortino ratio")
+        #st.write(sortino_ratio)
+with tab5:
+    st.sidebar.title("Modelo Black-Litterman")
+
+    # Entrada de símbolos desde la barra lateral
+    simbolos_input = st.sidebar.text_input(
+        "Activos (tickers separados por comas):", value="AGG, EMB, VOO, VWO, DBC"
+    )
+    simbolos = [s.strip() for s in simbolos_input.split(",")]
+
+    # Fecha de análisis
+    start_date = st.sidebar.date_input(
+        "Fecha de inicio:", value=datetime.now() - timedelta(days=365)
+    )
+    end_date = st.sidebar.date_input("Fecha de fin:", value=datetime.now())
+
+    # Validar si la fecha de inicio es anterior a la fecha de fin
+    if start_date >= end_date:
+        st.sidebar.error("La fecha de inicio debe ser anterior a la fecha de fin.")
+
+    if st.sidebar.button("Ejecutar modelo") and start_date < end_date:
+        try:
+            # Descargar datos de precios ajustados
+            data = yf.download(simbolos, start=start_date, end=end_date)["Adj Close"]
+
+            if data.empty:
+                st.error("No se encontraron datos para los tickers proporcionados en el rango de fechas seleccionado.")
+            else:
+                # Calcular los rendimientos logarítmicos diarios
+                returns = np.log(data / data.shift(1)).dropna()
+
+                # Matriz de covarianzas
+                cov_matrix = returns.cov()
+
+                # Calcular los rendimientos promedio anualizados
+                mean_returns = returns.mean() * 252
+
+                # Vector Q (expectativas del mercado) - Ajustados según nuevas perspectivas
+                Q = np.array([0.04, 0.06, 0.10, 0.12, 0.08])
+
+                # Parámetros ajustados según nuevas perspectivas optimistas
+                lambda_mkt = 2.5  # Aumento de la aversión al riesgo
+                tau = 0.05  # Aumento de la incertidumbre
+                S = np.diag(np.ones(len(simbolos)) * 0.01)  # Aumento de la matriz de incertidumbre
+
+                # Calcular el vector pi utilizando el promedio ponderado de los rendimientos del mercado
+                market_caps = np.array([2e12, 3e12, 1.5e12, 2.5e12, 1e12])  # Capitalización de mercado ajustada
+                weights_market = market_caps / market_caps.sum()
+
+                # Calcular el vector pi con el coeficiente de aversión al riesgo ajustado
+                pi = lambda_mkt * np.dot(cov_matrix, weights_market)
+
+                # Black-Litterman
+                M_inv = np.linalg.inv(cov_matrix)
+                BL = np.linalg.inv(M_inv + tau * np.dot(np.dot(S, np.linalg.inv(cov_matrix)), S)) @ (
+                    np.dot(M_inv, pi) + tau * np.dot(np.dot(S, np.linalg.inv(cov_matrix)), Q)
+                )
+
+                # Calcular la matriz de covarianza posterior
+                cov_post = cov_matrix + np.linalg.inv(M_inv + tau * np.dot(np.dot(S, np.linalg.inv(cov_matrix)), S))
+
+                # Construcción del portafolio óptimo basado en la distribución posterior
+                risk_free_rate = 0.0416  # Aumento de la tasa libre de riesgo
+                ones = np.ones(len(simbolos))
+
+                # Pesos óptimos usando la fórmula clásica de maximización de Sharpe ratio
+                weights_optimal = np.dot(
+                    np.linalg.inv(cov_post),
+                    BL - risk_free_rate * ones
+                )
+                weights_optimal /= np.dot(ones.T, np.dot(np.linalg.inv(cov_post), BL - risk_free_rate * ones))
+
+                # Mostrar resultados en Streamlit
+                st.header("Resultados del Modelo Black-Litterman")
+
+                # Expectativas ajustadas según Black-Litterman
+                st.subheader("Expectativas ajustadas según Black-Litterman")
+                st.dataframe(pd.DataFrame(BL.reshape(1, -1), columns=simbolos, index=["Rendimiento (%)"]).T)
+
+                # Pesos óptimos del portafolio
+                st.subheader("Pesos Óptimos del Portafolio")
+                st.bar_chart(pd.DataFrame(weights_optimal, index=simbolos, columns=["Pesos"]))
+
+                # Matriz de Covarianza Posterior
+                st.subheader("Matriz de Covarianza Posterior")
+                st.dataframe(pd.DataFrame(cov_post, index=simbolos, columns=simbolos))
+
+                # Gráfica de comparación
+                fig = go.Figure()
+                fig.add_trace(
+                    go.Bar(
+                        x=simbolos,
+                        y=mean_returns * 100,
+                        name="Rendimientos Históricos (%)",
+                        marker_color="blue",
+                    )
+                )
+                fig.add_trace(
+                    go.Bar(
+                        x=simbolos,
+                        y=BL * 100,
+                        name="Rendimientos Posteriores (%)",
+                        marker_color="red",
+                    )
+                )
+                fig.update_layout(
+                    title="Comparación de Rendimientos Históricos vs Posteriores",
+                    xaxis_title="Activos",
+                    yaxis_title="Rendimiento (%)",
+                    barmode="group",  # Agrupa las barras
+                    template="plotly_dark",
+                )
+                st.plotly_chart(fig)
+
+                # Comentarios personalizados sobre las perspectivas 
+                st.subheader("Perspectivas y ajustes de rendimiento")
+
+                comentarios = {
+                    "AGG": """
+                        *Perspectiva *:
+                        La economía global continúa mostrando señales de estabilidad y crecimiento moderado. Si la Reserva Federal mantiene su política monetaria, el entorno de tasas de interés podría mantenerse bajo o incluso disminuir, lo que aumentaría la demanda de bonos. Además, la inflación sigue contenida, lo que puede beneficiar a los bonos de alta calidad.
+                        *Ajuste*: 4%
+                    """,
+                    "EMB": """
+                        *Perspectiva *:
+                        En un contexto global de recuperación económica, los mercados emergentes se benefician de un repunte del comercio global y un aumento de la demanda por productos básicos. Si las economías emergentes experimentan un crecimiento sostenido, los spreads de crédito se estrechan, haciendo que los bonos emergentes sean más atractivos, lo que puede mejorar los rendimientos.
+                        *Ajuste*: 6%
+                    """,
+                    "VOO": """
+                        *Perspectiva *:
+                        Si las grandes empresas de EE. UU. siguen beneficiándose del auge tecnológico y las políticas fiscales continúan favoreciendo el crecimiento, el rendimiento del S&P 500 podría superar las expectativas históricas. Además, un mayor gasto en infraestructura y un mayor consumo interno pueden ayudar a las ganancias corporativas a seguir creciendo de manera robusta.
+                        *Ajuste*: 10%
+                    """,
+                    "VWO": """
+                        *Perspectiva *:
+                        Los mercados emergentes pueden beneficiarse de un crecimiento económico acelerado debido a la recuperación de las economías de Asia y América Latina, impulsada por la digitalización y la urbanización. Si los riesgos geopolíticos disminuyen y las economías emergentes aprovechan su ventaja de costos y recursos naturales, el rendimiento podría ser considerablemente más alto.
+                        *Ajuste*: 12%
+                    """,
+                    "DBC": """
+                        *Perspectiva *:
+                        Con el aumento de la demanda global de materias primas impulsada por la recuperación económica y la inflación, los precios de las materias primas pueden experimentar un fuerte repunte. Esto beneficiaría los activos ligados a commodities, como el DBC, especialmente si el crecimiento de la demanda global se mantiene.
+                        *Ajuste*: 8%
+                    """
+                }
+
+                # Mostrar los comentarios para cada activo
+                for activo, comentario in comentarios.items():
+                    st.markdown(f"### {activo}")
+                    st.markdown(comentario)
+
+        except Exception as e:
+            st.error(f"Error al ejecutar el modelo: {e}")
